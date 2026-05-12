@@ -21,3 +21,16 @@ test("moves passed reset time to tomorrow", () => {
   const parsed = parseResetFromText("resets 12:30am", now);
   assert.ok(parsed.reset.getDate() > now.getDate());
 });
+
+test("parses relative reset durations", () => {
+  const now = new Date("2026-05-12T20:00:00");
+  const parsed = parseResetFromText("You've hit your session limit · resets in 1h 15m ·", now);
+  assert.ok(parsed);
+  assert.equal(parsed.reset.getTime(), new Date("2026-05-12T21:15:00").getTime());
+  assert.equal(parsed.raw, "resets in 1h 15m");
+});
+
+test("detects session-limit reset duration", () => {
+  const text = "You've hit your session limit · resets in 1h ·";
+  assert.equal(looksLikeUsageLimit(text), true);
+});

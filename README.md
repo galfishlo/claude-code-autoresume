@@ -2,7 +2,7 @@
 
 Automatically resumes Claude Code after the official usage-limit reset time.
 
-This does **not** bypass, avoid, or manipulate Claude usage limits. It watches your local terminal session, waits until the reset time printed by Claude Code, and sends `continue` after that time arrives.
+This does **not** bypass, avoid, or manipulate Claude usage limits. It watches your local terminal session, or waits for a reset time you provide for a GUI session, and sends `continue` after that time arrives.
 
 ## What it solves
 
@@ -16,6 +16,12 @@ this tool can keep your Claude Code session alive, wait until 12:30am, and then 
 
 ```text
 continue
+```
+
+It also understands relative reset messages like:
+
+```text
+You've hit your session limit · resets in 1h ·
 ```
 
 ## Requirements
@@ -114,10 +120,71 @@ npx . dev
 The `dev` command:
 
 1. Starts Claude Code in a tmux session.
-2. Starts a watcher in a second tmux window.
-3. Attaches you to the Claude Code window.
+2. Pins the watcher to Claude Code's exact tmux pane.
+3. Starts a watcher in a second tmux window.
+4. Attaches you to the Claude Code window.
 
 Important: this tool cannot reliably control an already-running normal VS Code terminal or Claude sidebar/extension session. Claude Code must be running inside the tmux session.
+
+If you already have a managed tmux session, `start` prints the pane target:
+
+```text
+Watch:  cc-autoresume watch -s claude-auto --target %3
+```
+
+Use that exact `--target` when you want to run the watcher yourself from another VS Code terminal.
+
+## VS Code GUI usage
+
+If you use Claude in the VS Code side panel or chat UI instead of a terminal, tmux cannot see or control that session. On macOS, use GUI mode:
+
+```bash
+cc-autoresume gui "resets in 1h"
+```
+
+or:
+
+```bash
+cc-autoresume gui --at 12:30am
+```
+
+Then leave the Claude input box focused in VS Code. At the reset time, the tool activates VS Code, types `continue`, and presses Enter through macOS Accessibility automation.
+
+If Escape focuses Claude in your VS Code view, you can ask the tool to press it first:
+
+```bash
+cc-autoresume gui "resets in 1h" --press-escape
+```
+
+The first run may require granting Accessibility permission to your terminal app, Codex, or Node.js in macOS System Settings.
+
+To avoid retyping the reset message, copy the Claude banner text and read it from the clipboard:
+
+```bash
+cc-autoresume gui --clipboard
+```
+
+For the closest thing to automatic detection in the VS Code GUI flow, start clipboard watch before or after you hit the limit:
+
+```bash
+cc-autoresume gui --watch-clipboard
+```
+
+Then copy the Claude limit message, for example:
+
+```text
+You're out of extra usage · resets 12:30am (Asia/Jerusalem)
+```
+
+or:
+
+```text
+You've hit your session limit · resets in 1h ·
+```
+
+Once the clipboard contains a recognizable reset message, the tool schedules the resume. Leave the Claude input focused before the reset time.
+
+This GUI mode does not directly read the Claude side panel yet. It uses the clipboard because VS Code webview contents are not reliably exposed to a normal CLI process.
 
 ## Real-world test
 
@@ -180,9 +247,10 @@ cc-autoresume doctor     # check Node, tmux, and Claude Code
 cc-autoresume start      # start Claude Code in tmux
 cc-autoresume attach     # attach to the tmux session
 cc-autoresume watch      # watch for reset messages and auto-continue
-cc-autoresume status     # show recent tmux output
+cc-autoresume status     # show recent Claude pane output
 cc-autoresume dev        # start Claude + watcher in tmux, then attach
 cc-autoresume vscode     # alias for dev
+cc-autoresume gui        # resume a VS Code GUI session on macOS
 cc-autoresume fake-test  # create a fake limit session for testing
 ```
 
@@ -212,6 +280,16 @@ Example:
   "notify": true
 }
 ```
+
+Optional advanced setting:
+
+```json
+{
+  "target": "%3"
+}
+```
+
+Normally you do not need `target`; `cc-autoresume dev` resolves it automatically. Set it only when you want to pin the watcher to a specific tmux pane.
 
 ## Custom session
 
@@ -259,6 +337,22 @@ or:
 ```bash
 cc-autoresume start
 cc-autoresume attach
+```
+
+If you start with `cc-autoresume start` and run the watcher separately, copy the full command it prints, including `--target %...`. Watching only the session name can point at the wrong tmux window after a watcher window is created.
+
+For the VS Code side panel or chat UI, use:
+
+```bash
+cc-autoresume gui "resets in 1h"
+```
+
+Leave the Claude input focused before you walk away.
+
+If you want it to recognize the copied message automatically:
+
+```bash
+cc-autoresume gui --watch-clipboard
 ```
 
 ### `/rate-limit-options` menu is open

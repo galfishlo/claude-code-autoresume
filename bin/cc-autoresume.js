@@ -9,6 +9,8 @@ import { fileURLToPath } from "node:url";
 import { parseResetFromText, looksLikeUsageLimit } from "../src/parser.js";
 
 const DEFAULT_SESSION = "claude-auto";
+const DEFAULT_CLAUDE_WINDOW = "claude";
+const WATCHER_WINDOW = "watcher";
 const DEFAULT_MESSAGE = "continue";
 const CONFIG_DIR = join(homedir(), ".config", "claude-code-autoresume");
 const CONFIG_PATH = join(CONFIG_DIR, "config.json");
@@ -45,6 +47,13 @@ function requireTmux() {
   }
 }
 
+function requireMacOs(commandName) {
+  if (process.platform !== "darwin") {
+    console.error(`${commandName} only supports macOS GUI automation right now.`);
+    process.exit(1);
+  }
+}
+
 function sessionExists(session) {
   try {
     exec("tmux", ["has-session", "-t", session]);
@@ -54,16 +63,57 @@ function sessionExists(session) {
   }
 }
 
-function capturePane(session, lines = 300) {
+function targetExists(target) {
   try {
-    return exec("tmux", ["capture-pane", "-t", session, "-p", "-S", `-${lines}`]);
+    exec("tmux", ["display-message", "-p", "-t", target, "#{pane_id}"]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function resolveClaudeTarget(session) {
+  if (!sessionExists(session)) return null;
+
+  try {
+    return exec("tmux", ["display-message", "-p", "-t", `${session}:${DEFAULT_CLAUDE_WINDOW}.0`, "#{pane_id}"]);
+  } catch {}
+
+  try {
+    const panes = exec("tmux", [
+      "list-panes",
+      "-a",
+      "-F",
+      "#{session_name}\t#{window_name}\t#{pane_id}"
+    ]);
+
+    for (const line of panes.split("\n")) {
+      const [paneSession, windowName, paneId] = line.split("\t");
+      if (paneSession === session && windowName !== WATCHER_WINDOW && paneId) {
+        return paneId;
+      }
+    }
+  } catch {}
+
+  return null;
+}
+
+function capturePane(target, lines = 300) {
+  try {
+    return exec("tmux", ["capture-pane", "-t", target, "-p", "-S", `-${lines}`]);
   } catch {
     return "";
   }
 }
 
-function sendKeys(session, message) {
-  exec("tmux", ["send-keys", "-t", session, message, "Enter"]);
+function sendKeys(target, message) {
+  exec("tmux", ["send-keys", "-t", target, message, "Enter"]);
+}
+
+function selectTarget(target) {
+  try {
+    exec("tmux", ["select-pane", "-t", target]);
+  } catch {}
 }
 
 function sleep(ms) {
@@ -103,28 +153,98 @@ function notify(title, message) {
   }
 }
 
-function watchCommand(session) {
-  return `${shell(process.execPath)} ${shell(SCRIPT_PATH)} watch -s ${shell(session)}`;
+function sendGuiMessage(app, message, { pressEscape = false } = {}) {
+  const script = [
+    `tell application ${JSON.stringify(app)} to activate`,
+    "delay 0.5",
+    "tell application \"System Events\"",
+    pressEscape ? "  key code 53" : null,
+    pressEscape ? "  delay 0.2" : null,
+    `  keystroke ${JSON.stringify(message)}`,
+    "  key code 36",
+    "end tell"
+  ].filter(Boolean);
+
+  exec("osascript", script.flatMap((line) => ["-e", line]));
+}
+
+function readClipboard() {
+  return exec("pbpaste");
+}
+
+async function scheduleGuiResume({ resetText, app, message, pressEscape, dryRun, notificationsEnabled }) {
+  const parsed = parseResetFromText(resetText);
+
+  if (!parsed) {
+    console.error(`Could not parse reset time from: ${resetText}`);
+    console.error("Try: cc-autoresume gui --at 12:30am");
+    process.exit(1);
+  }
+
+  const waitMs = Math.max(parsed.reset.getTime() - Date.now(), 0);
+
+  console.log(`Detected: ${parsed.raw}`);
+  console.log(`Will focus ${app} and send "${message}" at ${parsed.reset.toLocaleString()}`);
+  console.log("Leave the Claude input box focused, or pass --press-escape if Escape focuses Claude in your VS Code view.");
+
+  if (dryRun) return;
+
+  if (notificationsEnabled) {
+    notify("Claude Code Auto Resume", `Waiting until ${parsed.reset.toLocaleTimeString()} to resume VS Code Claude.`);
+  }
+
+  await sleep(waitMs);
+  sendGuiMessage(app, message, { pressEscape });
+  console.log(`Sent "${message}" to ${app}`);
+
+  if (notificationsEnabled) {
+    notify("Claude Code Auto Resume", `Sent ${message} to ${app}.`);
+  }
+}
+
+function watchCommand(session, target) {
+  return [
+    shell(process.execPath),
+    shell(SCRIPT_PATH),
+    "watch",
+    "-s",
+    shell(session),
+    "--target",
+    shell(target)
+  ].join(" ");
 }
 
 function startSession(session, command) {
   if (sessionExists(session)) {
     console.log(`Session already exists: ${session}`);
-    return;
+    return resolveClaudeTarget(session);
   }
-  exec("tmux", ["new-session", "-d", "-s", session, command]);
+  const paneId = exec("tmux", [
+    "new-session",
+    "-d",
+    "-s",
+    session,
+    "-n",
+    DEFAULT_CLAUDE_WINDOW,
+    "-P",
+    "-F",
+    "#{pane_id}",
+    command
+  ]);
   console.log(`Started Claude Code session: ${session}`);
+  return paneId;
 }
 
-function startWatcherWindow(session) {
+function startWatcherWindow(session, target) {
   const windows = exec("tmux", ["list-windows", "-t", session, "-F", "#{window_name}"]);
-  if (windows.split("\n").includes("watcher")) {
-    console.log(`Watcher window already exists in session: ${session}`);
-    return;
+  if (windows.split("\n").includes(WATCHER_WINDOW)) {
+    exec("tmux", ["kill-window", "-t", `${session}:${WATCHER_WINDOW}`]);
+    console.log(`Restarted watcher window in tmux session: ${session}`);
   }
 
-  exec("tmux", ["new-window", "-t", session, "-n", "watcher", "sh", "-lc", watchCommand(session)]);
+  exec("tmux", ["new-window", "-t", session, "-n", WATCHER_WINDOW, "sh", "-lc", watchCommand(session, target)]);
   console.log(`Started watcher window in tmux session: ${session}`);
+  console.log(`Watching Claude pane: ${target}`);
 }
 
 function attachSession(session) {
@@ -181,10 +301,10 @@ program
     const session = opts.session || config.session;
     const command = opts.command || config.command;
 
-    startSession(session, command);
+    const target = startSession(session, command);
 
     console.log(`Attach: cc-autoresume attach -s ${session}`);
-    console.log(`Watch:  cc-autoresume watch -s ${session}`);
+    console.log(`Watch:  cc-autoresume watch -s ${session}${target ? ` --target ${target}` : ""}`);
   });
 
 program
@@ -216,8 +336,15 @@ program
     const session = opts.session || config.session;
     const command = opts.command || config.command;
 
-    startSession(session, command);
-    startWatcherWindow(session);
+    const target = startSession(session, command);
+
+    if (!target) {
+      console.error(`Could not resolve Claude pane for session: ${session}`);
+      process.exit(1);
+    }
+
+    startWatcherWindow(session, target);
+    selectTarget(target);
 
     console.log("\nVS Code workflow:");
     console.log("1. Use this attached tmux session as your Claude Code terminal.");
@@ -231,6 +358,7 @@ program
 program
   .command("watch")
   .option("-s, --session <name>", "tmux session name")
+  .option("-t, --target <target>", "tmux pane/window target to watch and resume")
   .option("-m, --message <message>", "message to send after reset")
   .option("-i, --interval <seconds>", "poll interval in seconds")
   .option("--no-notify", "disable desktop notification")
@@ -239,6 +367,7 @@ program
     requireTmux();
     const config = loadConfig();
     const session = opts.session || config.session;
+    const target = opts.target || config.target || resolveClaudeTarget(session);
     const message = opts.message || config.resumeMessage;
     const intervalMs = Number(opts.interval || config.pollIntervalSeconds) * 1000;
     const captureLines = Number(config.captureLines || 300);
@@ -249,11 +378,18 @@ program
       process.exit(1);
     }
 
+    if (!target || !targetExists(target)) {
+      console.error(`No Claude pane found for session: ${session}`);
+      console.error("Start one with: cc-autoresume dev");
+      process.exit(1);
+    }
+
     let scheduledRaw = null;
     console.log(`Watching session: ${session}`);
+    console.log(`Watching target: ${target}`);
 
     while (true) {
-      const pane = capturePane(session, captureLines);
+      const pane = capturePane(target, captureLines);
 
       if (looksLikeUsageLimit(pane)) {
         const parsed = parseResetFromText(pane);
@@ -270,11 +406,11 @@ program
           }
 
           await sleep(waitMs);
-          sendKeys(session, message);
-          console.log(`Sent "${message}" to ${session}`);
+          sendKeys(target, message);
+          console.log(`Sent "${message}" to ${target}`);
 
           if (notificationsEnabled) {
-            notify("Claude Code Auto Resume", `Sent ${message} to ${session}.`);
+            notify("Claude Code Auto Resume", `Sent ${message} to ${target}.`);
           }
 
           await sleep(60_000);
@@ -286,20 +422,104 @@ program
   });
 
 program
+  .command("gui")
+  .alias("vscode-gui")
+  .argument("[resetText...]", "reset text, for example: \"resets 12:30am\" or \"resets in 1h\"")
+  .option("-r, --reset <text>", "reset text to parse")
+  .option("--at <time>", "reset clock time, for example 12:30am")
+  .option("--in <duration>", "relative wait, for example 1h, 90m, or \"1h 15m\"")
+  .option("--clipboard", "read reset text from the macOS clipboard")
+  .option("--watch-clipboard", "wait until the clipboard contains a Claude limit message")
+  .option("-a, --app <name>", "macOS app name to focus", "Visual Studio Code")
+  .option("-m, --message <message>", "message to type after reset")
+  .option("-i, --interval <seconds>", "clipboard polling interval in seconds", "2")
+  .option("--press-escape", "press Escape before typing, useful if Claude is not focused")
+  .option("--dry-run", "show the parsed schedule without typing anything")
+  .option("--no-notify", "disable desktop notification")
+  .description("Resume a non-terminal VS Code Claude session with macOS GUI automation")
+  .action(async (resetTextParts, opts) => {
+    requireMacOs("gui");
+    const config = loadConfig();
+    const message = opts.message || config.resumeMessage;
+    const notificationsEnabled = opts.notify && config.notify;
+    const intervalMs = Math.max(Number(opts.interval || 2), 1) * 1000;
+
+    if (opts.watchClipboard) {
+      console.log("Watching clipboard for a Claude usage-limit reset message...");
+      console.log("Copy the reset banner from VS Code, then leave the Claude input focused.");
+
+      let lastClipboard = null;
+
+      while (true) {
+        const clipboard = readClipboard();
+
+        if (clipboard && clipboard !== lastClipboard) {
+          lastClipboard = clipboard;
+
+          if (looksLikeUsageLimit(clipboard) && parseResetFromText(clipboard)) {
+            await scheduleGuiResume({
+              resetText: clipboard,
+              app: opts.app,
+              message,
+              pressEscape: opts.pressEscape,
+              dryRun: opts.dryRun,
+              notificationsEnabled
+            });
+            return;
+          }
+        }
+
+        await sleep(intervalMs);
+      }
+    }
+
+    const resetText =
+      opts.reset ||
+      (opts.at ? `resets ${opts.at}` : null) ||
+      (opts.in ? `resets in ${opts.in}` : null) ||
+      (opts.clipboard ? readClipboard() : null) ||
+      resetTextParts.join(" ");
+
+    if (!resetText.trim()) {
+      console.error("Provide reset text, for example:");
+      console.error("  cc-autoresume gui \"resets in 1h\"");
+      console.error("  cc-autoresume gui --at 12:30am");
+      console.error("  cc-autoresume gui --clipboard");
+      process.exit(1);
+    }
+
+    await scheduleGuiResume({
+      resetText,
+      app: opts.app,
+      message,
+      pressEscape: opts.pressEscape,
+      dryRun: opts.dryRun,
+      notificationsEnabled
+    });
+  });
+
+program
   .command("status")
   .option("-s, --session <name>", "tmux session name")
+  .option("-t, --target <target>", "tmux pane/window target to inspect")
   .description("Show recent terminal output from the session")
   .action((opts) => {
     requireTmux();
     const config = loadConfig();
     const session = opts.session || config.session;
+    const target = opts.target || config.target || resolveClaudeTarget(session);
 
     if (!sessionExists(session)) {
       console.error(`No tmux session found: ${session}`);
       process.exit(1);
     }
 
-    console.log(capturePane(session, config.captureLines));
+    if (!target || !targetExists(target)) {
+      console.error(`No Claude pane found for session: ${session}`);
+      process.exit(1);
+    }
+
+    console.log(capturePane(target, config.captureLines));
   });
 
 program
