@@ -1,0 +1,30 @@
+{
+  "name": "claude-code-autoresume",
+  "version": "0.2.0",
+  "description": "Automatically resumes Claude Code after the official usage-limit reset time.",
+  "type": "module",
+  "bin": {
+    "cc-autoresume": "./bin/cc-autoresume.js"
+  },
+  "scripts": {
+    "test": "node --test",
+    "lint": "node --check bin/cc-autoresume.js && node --check src/parser.js"
+  },
+  "keywords": [
+    "claude-code",
+    "claude",
+    "tmux",
+    "cli",
+    "automation",
+    "developer-tools"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "commander": "^12.1.0"
+  },
+  "devDependencies": {}
+}
